@@ -13,6 +13,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/rancher/rancher/pkg/controllers/dashboard/plugin"
+	"github.com/rancher/rancher/pkg/utils"
 	"github.com/sirupsen/logrus"
 	"k8s.io/apiserver/pkg/endpoints/request"
 )
@@ -100,18 +101,7 @@ func proxyRequest(target, path string, w http.ResponseWriter, r *http.Request, d
 }
 
 func denylist(host string) bool {
-	denied := map[string]struct{}{
-		"localhost":       {},
-		"127.0.0.1":       {},
-		"0.0.0.0":         {},
-		"169.254.169.254": {},
-		"::1":             {},
-		"::":              {},
-		"":                {},
-	}
-	_, isDenied := denied[host]
-
-	return isDenied
+	return utils.IsPrivateHost(host)
 }
 
 func isAuthenticated(r *http.Request) bool {

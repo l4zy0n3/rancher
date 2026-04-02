@@ -20,6 +20,7 @@ import (
 	filepathsecure "github.com/cyphar/filepath-securejoin"
 	v1 "github.com/rancher/rancher/pkg/apis/catalog.cattle.io/v1"
 	"github.com/rancher/rancher/pkg/settings"
+	"github.com/rancher/rancher/pkg/utils"
 	"github.com/sirupsen/logrus"
 )
 
@@ -72,6 +73,9 @@ func (c FSCache) SyncWithControllersCache(p *v1.UIPlugin, forceUpdate bool) erro
 	}
 
 	if plugin.CompressedEndpoint != "" {
+		if err := validateEndpointURL(plugin.CompressedEndpoint); err != nil {
+			return fmt.Errorf("invalid CompressedEndpoint URL: %w", err)
+		}
 		resp, err := http.Get(plugin.CompressedEndpoint)
 		if err != nil {
 			return fmt.Errorf("get request failed for URL [%s]. Error: %w", plugin.CompressedEndpoint, err)
@@ -176,7 +180,14 @@ func Untar(dst string, r io.Reader) error {
 			continue
 		}
 
-		target := filepath.Join(dst, header.Name)
+		if filepath.IsAbs(header.Name) || strings.Contains(header.Name, "..") {
+			return fmt.Errorf("tar entry %q contains invalid path component", header.Name)
+		}
+
+		target, err := filepathsecure.SecureJoin(dst, header.Name)
+		if err != nil {
+			return fmt.Errorf("invalid tar entry path %q: %w", header.Name, err)
+		}
 
 		switch header.Typeflag {
 
@@ -188,7 +199,10 @@ func Untar(dst string, r io.Reader) error {
 
 		// if it's a file create it
 		case tar.TypeReg:
-			f, err := os.OpenFile(target, os.O_CREATE|os.O_RDWR, os.FileMode(header.Mode))
+			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+				return err
+			}
+			f, err := os.OpenFile(target, os.O_CREATE|os.O_RDWR, os.FileMode(header.Mode)&0755)
 			if err != nil {
 				return err
 			}
@@ -385,6 +399,24 @@ func validateFilesTxtEntries(entries []string) error {
 		if fileNameRegex.MatchString(file) {
 			return fmt.Errorf("invalid file entry: %s", file)
 		}
+	}
+	return nil
+}
+
+func validateEndpointURL(rawURL string) error {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("failed to parse URL: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("scheme %q not allowed", u.Scheme)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("empty hostname")
+	}
+	if utils.IsPrivateHost(host) {
+		return fmt.Errorf("host %q resolves to non-routable address", host)
 	}
 	return nil
 }

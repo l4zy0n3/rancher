@@ -1,9 +1,13 @@
 package plugin
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"testing"
 
 	v1 "github.com/rancher/rancher/pkg/apis/catalog.cattle.io/v1"
@@ -329,6 +333,81 @@ func Test_validateFilesTxtEntries(t *testing.T) {
 			err := validateFilesTxtEntries(tc.Files)
 			if tc.ShouldErr {
 				assert.ErrorContains(t, err, "invalid file entry")
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func makeTarGz(t *testing.T, name, content string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gw)
+	data := []byte(content)
+	assert.NoError(t, tw.WriteHeader(&tar.Header{Name: name, Mode: 0644, Size: int64(len(data))}))
+	_, err := tw.Write(data)
+	assert.NoError(t, err)
+	tw.Close()
+	gw.Close()
+	return buf.Bytes()
+}
+
+func TestUntar_PathTraversal(t *testing.T) {
+	testCases := []struct {
+		Name      string
+		TarEntry  string
+		ShouldErr bool
+	}{
+		{Name: "relative traversal", TarEntry: "../../etc/passwd", ShouldErr: true},
+		{Name: "deep traversal", TarEntry: "../../../tmp/pwned", ShouldErr: true},
+		{Name: "single parent", TarEntry: "../sibling", ShouldErr: true},
+		{Name: "absolute path", TarEntry: "/tmp/absolute", ShouldErr: true},
+		{Name: "valid nested path", TarEntry: "plugin/index.js", ShouldErr: false},
+		{Name: "valid flat file", TarEntry: "readme.txt", ShouldErr: false},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.Name, func(t *testing.T) {
+			dst := filepath.Join(t.TempDir(), "cache")
+			assert.NoError(t, os.MkdirAll(dst, 0755))
+
+			tarGz := makeTarGz(t, tc.TarEntry, "test")
+			err := Untar(dst, bytes.NewReader(tarGz))
+			if tc.ShouldErr {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), "invalid path")
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestValidateEndpointURL(t *testing.T) {
+	testCases := []struct {
+		Name      string
+		URL       string
+		ShouldErr bool
+	}{
+		{Name: "loopback ipv4", URL: "http://127.0.0.1/a.tar.gz", ShouldErr: true},
+		{Name: "localhost", URL: "http://localhost/a.tar.gz", ShouldErr: true},
+		{Name: "private 10.x", URL: "http://10.0.0.1/a.tar.gz", ShouldErr: true},
+		{Name: "private 172.16.x", URL: "http://172.16.0.1/a.tar.gz", ShouldErr: true},
+		{Name: "private 192.168.x", URL: "http://192.168.1.1/a.tar.gz", ShouldErr: true},
+		{Name: "link-local metadata", URL: "http://169.254.169.254/latest/", ShouldErr: true},
+		{Name: "ftp scheme", URL: "ftp://evil.com/a.tar.gz", ShouldErr: true},
+		{Name: "file scheme", URL: "file:///etc/passwd", ShouldErr: true},
+		{Name: "empty host", URL: "http:///path", ShouldErr: true},
+		{Name: "ipv6 loopback", URL: "http://[::1]/a.tar.gz", ShouldErr: true},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.Name, func(t *testing.T) {
+			err := validateEndpointURL(tc.URL)
+			if tc.ShouldErr {
+				assert.Error(t, err)
 			} else {
 				assert.NoError(t, err)
 			}
